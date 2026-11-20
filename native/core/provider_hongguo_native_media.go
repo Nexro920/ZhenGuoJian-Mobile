@@ -26,11 +26,23 @@ func (downloader *Downloader) resolveHongguoAppMedia(ctx context.Context, videoI
 	}
 	data := nestedMap(result, "data")
 	model, _ := data["video_model"].(map[string]any)
-	if encoded, ok := data["video_model"].(string); ok {
+	if encoded, ok := data["video_model"].(string); ok && encoded != "" {
+		if decoded, err := decodeHongguoBase64(encoded); err == nil && len(decoded) > 0 {
+			encoded = string(decoded)
+		}
 		decoder := json.NewDecoder(strings.NewReader(encoded))
 		decoder.UseNumber()
 		if err := decoder.Decode(&model); err != nil {
 			return providerMedia{}, errors.New("红果 App 播放信息格式异常")
+		}
+	}
+	if len(model) == 0 {
+		if rows := anyList(data["video_list"]); len(rows) > 0 {
+			model = map[string]any{
+				"video_list":     data["video_list"],
+				"video_duration": data["video_duration"],
+				"duration":       data["duration"],
+			}
 		}
 	}
 	return selectHongguoAppMedia(model)
@@ -84,6 +96,12 @@ func selectHongguoAppMedia(model map[string]any) (providerMedia, error) {
 			height = width
 		}
 		media.Quality = height
+		switch codec {
+		case "h264", "avc1", "avc3":
+			media.Codec = "h264"
+		case "bytevc1", "hevc", "h265", "hvc1", "hev1":
+			media.Codec = "hevc"
+		}
 		quality := height * 10
 		if codec == "h264" || codec == "avc1" {
 			quality++

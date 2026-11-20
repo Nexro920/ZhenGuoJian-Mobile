@@ -164,6 +164,10 @@ abstract class AppRepository {
   }) => enqueueDownloads(detail, episodes, quality: quality);
   Future<PlaybackPlan?> localPlayback(Drama drama, Episode episode) async =>
       null;
+  Future<PlaybackPlan?> proxyLocal(
+    String filePath, {
+    String decryptionKey = '',
+  }) async => null;
   Future<PlaybackPlan> resolveOnline(
     Drama drama,
     Episode episode, {
@@ -864,6 +868,21 @@ class NativeRepository extends AppRepository {
       'action': 'localPlayback',
       'drama': drama.toJson(),
       'index': episode.number,
+    });
+    if ((result['url'] as String? ?? '').isEmpty) return null;
+    return PlaybackPlan.fromJson(result);
+  }
+
+  @override
+  Future<PlaybackPlan?> proxyLocal(
+    String filePath, {
+    String decryptionKey = '',
+  }) async {
+    if (filePath.isEmpty) return null;
+    final result = await _call({
+      'action': 'proxyLocal',
+      'path': filePath,
+      'decryptionKey': decryptionKey,
     });
     if ((result['url'] as String? ?? '').isEmpty) return null;
     return PlaybackPlan.fromJson(result);

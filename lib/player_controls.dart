@@ -82,6 +82,7 @@ class _PlayerControlsState extends State<PlayerControls> {
   bool _suppressAutoPlaybackStart = false;
   bool _lastPlaying = false;
   double? _seekValue;
+  Offset? _doubleTapPosition;
 
   @override
   void initState() {
@@ -242,9 +243,27 @@ class _PlayerControlsState extends State<PlayerControls> {
               child: GestureDetector(
                 behavior: HitTestBehavior.opaque,
                 onTap: _tap,
+                onDoubleTapDown: (details) {
+                  _doubleTapPosition = details.localPosition;
+                },
                 onDoubleTap: () {
                   if (!widget.enabled || widget.interactions.suppressTap) {
                     return;
+                  }
+                  final tapPos = _doubleTapPosition;
+                  _doubleTapPosition = null;
+                  if (widget.swipeEnabled &&
+                      tapPos != null &&
+                      constraints.maxWidth > 0) {
+                    final ratio = tapPos.dx / constraints.maxWidth;
+                    if (ratio < 0.28) {
+                      widget.interactions.seek(-10);
+                      return;
+                    }
+                    if (ratio > 0.72) {
+                      widget.interactions.seek(10);
+                      return;
+                    }
                   }
                   widget.onTogglePlayback();
                   _show();

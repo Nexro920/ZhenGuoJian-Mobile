@@ -990,7 +990,40 @@ class _PlayerScreenState extends State<PlayerScreen>
       if (prepared == null) {
         return;
       }
-      final plan = prepared;
+      var plan = prepared;
+      if (_player is LunaExoPlayer &&
+          plan.local &&
+          plan.url.isNotEmpty &&
+          (plan.decryptionKey.isNotEmpty ||
+              plan.url.toLowerCase().endsWith('.m3u8'))) {
+        final proxied = await widget.repository.proxyLocal(
+          plan.url,
+          decryptionKey: plan.decryptionKey,
+        );
+        if (_closed || ticket != _generation) {
+          if (proxied != null) {
+            await widget.repository.release(proxied.session);
+          }
+          return;
+        }
+        if (proxied != null && proxied.url.isNotEmpty) {
+          plan = PlaybackPlan(
+            url: proxied.url,
+            headers: proxied.headers,
+            decryptionKey: '',
+            quality: plan.quality,
+            qualities: plan.qualities,
+            session: proxied.session,
+            danmakuId: plan.danmakuId,
+            prefetchedBytes: plan.prefetchedBytes,
+            expiresAt: plan.expiresAt,
+            routeIndex: plan.routeIndex,
+            routeCount: plan.routeCount,
+            local: true,
+          );
+          prepared = plan;
+        }
+      }
       await _serialize(() async {
         if (_closed || ticket != _generation) {
           await widget.repository.release(plan.session);
@@ -1036,7 +1069,7 @@ class _PlayerScreenState extends State<PlayerScreen>
               plan.local
                   ? 'protocol_whitelist=[file,crypto,data]'
                   : 'protocol_whitelist=[http,https,tcp,tls,crypto,data,file]',
-              if (plan.decryptionKey.isNotEmpty)
+              if (plan.local && plan.decryptionKey.isNotEmpty)
                 'decryption_key=${plan.decryptionKey}',
             ].join(','),
           );

@@ -41,6 +41,7 @@ class _SourcesScreenState extends State<SourcesScreen> {
   final _expandedHealth = <String>{};
   Timer? _timer;
   bool _polling = false;
+  bool _checkingAll = false;
   int _ticks = 0;
 
   @override
@@ -131,6 +132,30 @@ class _SourcesScreenState extends State<SourcesScreen> {
     }
   }
 
+  Future<void> _checkAll(List<SourceSite> sources) async {
+    if (_checkingAll || sources.isEmpty) return;
+    final candidates = [
+      for (final source in sources)
+        if (!_pending.contains(source.id) &&
+            !(_statuses[source.id]?.running ?? false))
+          source,
+    ];
+    if (candidates.isEmpty) return;
+    setState(() => _checkingAll = true);
+    try {
+      await Future.wait([
+        for (final source in candidates) _run(source, 'check'),
+      ]);
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('已启动全部 ${candidates.length} 个站源的连通性检测')),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _checkingAll = false);
+    }
+  }
+
   Future<void> _copy(SourceSite source, SourceStatus status) async {
     final text = StringBuffer('${source.name}\n');
     text.writeln(
@@ -174,7 +199,27 @@ class _SourcesScreenState extends State<SourcesScreen> {
           ? viewPaddingBottom
           : paddingBottom;
       return Scaffold(
-        appBar: AppBar(title: const Text('站源管理')),
+        appBar: AppBar(
+          title: const Text('站源管理'),
+          actions: [
+            if (sources.isNotEmpty)
+              Padding(
+                padding: const EdgeInsets.only(right: 8),
+                child: TextButton.icon(
+                  key: const ValueKey('check-all-sources'),
+                  onPressed: _checkingAll ? null : () => _checkAll(sources),
+                  icon: _checkingAll
+                      ? const SizedBox(
+                          width: 16,
+                          height: 16,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
+                      : const Icon(Icons.network_check),
+                  label: const Text('检测全部'),
+                ),
+              ),
+          ],
+        ),
         body: Center(
           child: ConstrainedBox(
             constraints: const BoxConstraints(maxWidth: 960),

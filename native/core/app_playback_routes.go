@@ -5,11 +5,14 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
+	"net/url"
 	"sort"
+	"strings"
 	"time"
 )
 
 type nativePlaybackChoice struct {
+	dramaID       string
 	danmakuSeries string
 	danmakuVideo  string
 	media         []providerMedia
@@ -17,6 +20,61 @@ type nativePlaybackChoice struct {
 	qualities     []int
 	streamSession string
 	created       time.Time
+}
+
+func nativeRouteKey(media providerMedia) string {
+	parsed, err := url.Parse(media.URL)
+	if err != nil {
+		return ""
+	}
+	host := strings.ToLower(strings.TrimSpace(parsed.Hostname()))
+	if host == "" {
+		return ""
+	}
+	return host + "|" + strings.ToLower(strings.TrimSpace(media.Codec))
+}
+
+func (engine *nativeEngine) rememberPreferredRoute(dramaID string, routeKey string) {
+	if dramaID == "" || routeKey == "" {
+		return
+	}
+	engine.mu.Lock()
+	if engine.preferredRoutes == nil {
+		engine.preferredRoutes = map[string]string{}
+	}
+	if len(engine.preferredRoutes) >= 64 {
+		for k := range engine.preferredRoutes {
+			if k != dramaID {
+				delete(engine.preferredRoutes, k)
+				break
+			}
+		}
+	}
+	engine.preferredRoutes[dramaID] = routeKey
+	engine.mu.Unlock()
+}
+
+func (engine *nativeEngine) applyPreferredRoute(dramaID string, choice *nativePlaybackChoice) {
+	if dramaID == "" || choice == nil || len(choice.media) <= 1 {
+		return
+	}
+	engine.mu.Lock()
+	preferred := engine.preferredRoutes[dramaID]
+	engine.mu.Unlock()
+	if preferred == "" {
+		return
+	}
+	for i := 1; i < len(choice.media); i++ {
+		if nativeRouteKey(choice.media[i]) == preferred {
+			promoted := choice.media[i]
+			reordered := make([]providerMedia, 0, len(choice.media))
+			reordered = append(reordered, promoted)
+			reordered = append(reordered, choice.media[:i]...)
+			reordered = append(reordered, choice.media[i+1:]...)
+			choice.media = reordered
+			return
+		}
+	}
 }
 
 func nativePlaybackChoices(media providerMedia, quality int) nativePlaybackChoice {
@@ -74,7 +132,7 @@ func (engine *nativeEngine) nativeOpenPlayback(ctx context.Context, choice nativ
 	plan := nativePlan{
 		DanmakuID: choice.danmakuVideo,
 		URL:       media.URL, Headers: map[string]string{"User-Agent": userAgent, "Referer": media.Referer},
-		Key: hex.EncodeToString(media.CENCKey), Quality: media.Quality, Qualities: choice.qualities,
+		Key: hex.EncodeToString(media.CENCKey), Codec: media.Codec, Duration: media.Duration.Seconds(), Quality: media.Quality, Qualities: choice.qualities,
 		RouteIndex: choice.index, RouteCount: len(choice.media), Session: hex.EncodeToString(tokenBytes),
 	}
 	if media.credentials != nil && !media.credentials.expires.IsZero() {
@@ -141,7 +199,11 @@ func (engine *nativeEngine) nativeNextPlayback(ctx context.Context, session stri
 		return nativePlan{}, errors.New("播放线路已失效，请重新解析播放")
 	}
 	choice.index++
-	return engine.nativeOpenPlayback(ctx, choice)
+	plan, err := engine.nativeOpenPlayback(ctx, choice)
+	if err == nil && choice.dramaID != "" && choice.index >= 0 && choice.index < len(choice.media) {
+		engine.rememberPreferredRoute(choice.dramaID, nativeRouteKey(choice.media[choice.index]))
+	}
+	return plan, err
 }
 
 func (engine *nativeEngine) nativeReleasePlayback(session string) {

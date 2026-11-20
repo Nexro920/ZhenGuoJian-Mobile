@@ -154,7 +154,7 @@ class LocalStore extends ChangeNotifier {
 
   void _loadSourceGate() {
     final enabled = _bool('sourceGateEnabled') ?? false;
-    final off = _bool('sourceGateOff') ?? false;
+    final off = _bool('sourceGateOff') ?? !enabled;
     final salt = _string('sourceGateSalt') ?? '';
     final hash = _string('sourceGateHash') ?? '';
     final valid =

@@ -24,7 +24,7 @@ import 'diary_service.dart';
 
 Future<void> main(List<String> arguments) async {
   WidgetsFlutterBinding.ensureInitialized();
-  DiaryService.add('[App] 应用启动，版本: 0.2.64+71, 平台: ${Platform.operatingSystem}');
+  DiaryService.add('[App] 应用启动，版本: $appVersion+72, 平台: ${Platform.operatingSystem}');
   if (Platform.isAndroid) {
     await SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
     SystemChrome.setSystemUIOverlayStyle(AppTheme.systemBars(Brightness.dark));
@@ -32,7 +32,9 @@ Future<void> main(List<String> arguments) async {
   if (Platform.isWindows) {
     await windowManager.ensureInitialized();
   }
-  MediaKit.ensureInitialized();
+  if (!Platform.isAndroid) {
+    MediaKit.ensureInitialized();
+  }
   VideoEnhancementAssets.registerLicenses();
   if (Platform.isWindows && arguments.firstOrNull == '--package-smoke') {
     await runPackageSmoke(arguments);

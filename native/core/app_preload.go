@@ -70,6 +70,18 @@ func (stream *nativeStreamServer) nativePrefetch(ctx context.Context, token, ent
 		if !exists {
 			return false
 		}
+		if len(session.cencKey) == 16 && !strings.Contains(asset.contentType, "mpegurl") {
+			warmed := stream.warmCENC(ctx, token+"/"+id, session, asset)
+			if warmed > 0 {
+				if warmed > remaining {
+					remaining = 0
+				} else {
+					remaining -= warmed
+				}
+				return true
+			}
+			return false
+		}
 		playlist := strings.Contains(asset.contentType, "mpegurl")
 		if len(asset.data) == 0 {
 			requests++
@@ -111,6 +123,16 @@ func (stream *nativeStreamServer) nativePrefetch(ctx context.Context, token, ent
 			}
 			if playlist {
 				asset.contentType = "application/vnd.apple.mpegurl"
+			} else if asset.total == int64(len(body)) &&
+				!strings.Contains(strings.ToLower(asset.contentType), "video/mp4") &&
+				asset.contentType != "application/octet-stream" &&
+				!strings.HasSuffix(strings.ToLower(id), ".key") {
+				if offset := disguisedTSPrefixOffset(body); offset > 0 {
+					body = body[offset:]
+					asset.data = body
+					asset.total = int64(len(body))
+					asset.contentType = "video/mp2t"
+				}
 			}
 			remaining -= int64(len(body))
 			session.mu.Lock()

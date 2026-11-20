@@ -49,10 +49,10 @@ class DiaryService {
 
   /// 在界面上弹出交互式日记弹窗（兼容 TV 遥控器与手机触屏）
   static Future<void> showDiaryDialog(BuildContext context) {
+    final scrollController = ScrollController();
     return showDialog<void>(
       context: context,
       builder: (dialogContext) {
-        final scrollController = ScrollController();
         return AlertDialog(
           backgroundColor: const Color(0xFF1E1E24),
           shape: RoundedRectangleBorder(
@@ -171,6 +171,6 @@ class DiaryService {
           ],
         );
       },
-    );
+    ).whenComplete(scrollController.dispose);
   }
 }

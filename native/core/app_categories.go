@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"html"
@@ -20,8 +21,6 @@ type nativeCategory struct {
 var nativeAICategories = []nativeCategory{
 	{ID: "ai-duanju", Name: "AI 短剧"},
 	{ID: "ai-manju", Name: "AI 漫剧"},
-	{ID: "ai-huanlian", Name: "AI 换脸"},
-	{ID: "ai-mogai", Name: "AI 魔改"},
 }
 
 func nativeCatalogKey(source, category string) string {
@@ -46,6 +45,7 @@ func validNativeCategory(source, category string) bool {
 				return true
 			}
 		}
+		return hongguoTagPattern.MatchString(category)
 	case sourceHuangguoAI:
 		for _, entry := range nativeAICategories {
 			if category == entry.ID {
@@ -81,7 +81,7 @@ func (engine *nativeEngine) nativeCategories(ctx context.Context, source string,
 		for _, genre := range hongguoAppGenres {
 			all = append(all, nativeCategory{ID: genre.key, Name: genre.name})
 		}
-		return all, nil
+		return engine.hongguoCategories(ctx, all, force), nil
 	case sourceHuangguoAI:
 		return append(all, nativeAICategories...), nil
 	case sourceHuangdou:
@@ -144,14 +144,37 @@ func (engine *nativeEngine) nativeCategories(ctx context.Context, source string,
 	if len(all) == 1 {
 		return nil, errors.New("站源暂未返回内容分类，请稍后重试")
 	}
+	engine.rememberCategories(source, all)
+	return all, nil
+}
+
+func (engine *nativeEngine) hongguoCategories(ctx context.Context, genres []nativeCategory, force bool) []nativeCategory {
 	engine.mu.Lock()
+	cached := append([]nativeCategory{}, engine.categoryOptions[sourceHongguo]...)
+	engine.mu.Unlock()
+	if len(cached) > len(genres) && !force {
+		return cached
+	}
+	tags, err := engine.downloader.fetchHongguoTagCategories(ctx)
+	if err != nil {
+		if len(cached) > len(genres) {
+			return cached
+		}
+		return genres
+	}
+	all := append(genres, tags...)
+	engine.rememberCategories(sourceHongguo, all)
+	return all
+}
+
+func (engine *nativeEngine) rememberCategories(source string, all []nativeCategory) {
+	engine.mu.Lock()
+	defer engine.mu.Unlock()
 	if engine.categoryOptions == nil {
 		engine.categoryOptions = map[string][]nativeCategory{}
 	}
 	engine.categoryOptions[source] = all
 	engine.writeCatalogDiskLocked()
-	engine.mu.Unlock()
-	return all, nil
 }
 
 var categoryAnchorPattern = regexp.MustCompile(`(?is)<a\b([^>]*)>(.*?)</a>`)
@@ -205,10 +228,11 @@ func (d *Downloader) fetchHuangguoAICatalogPage(ctx context.Context, page int, c
 				results[index].err = ctx.Err()
 				return
 			}
-			address := fmt.Sprintf("%s/api/videos/category/%s?sort=hot&page=%d&size=24", d.providerBaseURL(sourceHuangguoAI), url.PathEscape(entry.ID), page)
-			body, err := d.fetchProviderText(ctx, address, d.providerBaseURL(sourceHuangguoAI)+"/"+entry.ID+"/")
+			path := fmt.Sprintf("/api/videos/category/%s?sort=hot&page=%d&size=24", url.PathEscape(entry.ID), page)
+			var body json.RawMessage
+			err := d.huangguoAIAPI(ctx, path, &body)
 			if err == nil {
-				results[index].items = parseHuangguoAIJSONCards([]byte(body), address, entry.Name)
+				results[index].items = parseHuangguoAIJSONCards(body, d.providerBaseURL(sourceHuangguoAI)+"/", entry.Name)
 			}
 			if err != nil {
 				results[index].err = fmt.Errorf("%s: %w", entry.Name, err)

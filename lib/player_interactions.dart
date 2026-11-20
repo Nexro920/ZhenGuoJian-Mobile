@@ -198,9 +198,8 @@ class PlayerInteractions extends ChangeNotifier {
       if (event.localPosition.dx < width * 0.35) {
         _swipeAction = SwipeAction.brightness;
         AppDevice.getBrightness().then((val) {
-          if (_pointer == event.pointer) {
+          if (!_disposed && _pointer == event.pointer) {
             _initialBrightness = _brightness = val;
-            _showHud(SwipeAction.brightness, _brightness);
           }
         });
       } else {
@@ -248,7 +247,7 @@ class PlayerInteractions extends ChangeNotifier {
         isVertical &&
         event.timeStamp - _started < const Duration(milliseconds: 1500)) {
       if (available()) hint(onEpisode(delta.dy < 0 ? 1 : -1));
-    } else if (_swipeAction == SwipeAction.brightness) {
+    } else if (_swipeAction == SwipeAction.brightness && isBrightnessActive) {
       _scheduleDismissHud();
     }
 

@@ -71,6 +71,12 @@ type Downloader struct {
 	legacy                *legacyAPIClient
 	previewMu             sync.Mutex
 	previewSessions       map[string]*huangguoPreviewSession
+	edgeMu                sync.Mutex
+	edgeSessions          map[string]*huangguoEdgeSession
+	edgePending           map[string]*huangguoEdgeSessionCall
+	edgeModes             map[string]string
+	huangdouClientOnce    sync.Once
+	huangdouInsecure      *http.Client
 }
 
 func defaultConfig() Config { return Config{MaxPagesPerSort: 50, PageSize: 30, Retries: 2} }
@@ -119,6 +125,8 @@ type nativeInput struct {
 	Session          string                  `json:"session"`
 	Sequence         int64                   `json:"sequence"`
 	Force            bool                    `json:"force"`
+	Path             string                  `json:"path"`
+	Key              string                  `json:"decryptionKey"`
 }
 
 type nativeCatalogResult struct {
@@ -140,6 +148,8 @@ type nativePlan struct {
 	URL             string            `json:"url"`
 	Headers         map[string]string `json:"headers"`
 	Key             string            `json:"decryptionKey,omitempty"`
+	Codec           string            `json:"codec,omitempty"`
+	Duration        float64           `json:"duration,omitempty"`
 	Quality         int               `json:"quality"`
 	Qualities       []int             `json:"qualities"`
 	Session         string            `json:"session,omitempty"`
@@ -170,6 +180,7 @@ type nativeEngine struct {
 	covers           *nativeCoverCache
 	stream           *nativeStreamServer
 	playbacks        map[string]nativePlaybackChoice
+	preferredRoutes  map[string]string
 	playbackMu       sync.Mutex
 	playbackSequence int64
 	playbackCancel   context.CancelFunc
@@ -478,9 +489,65 @@ func nativeDispatch(input nativeInput) (any, error) {
 	case "release":
 		engine.nativeReleasePlayback(input.Session)
 		return true, nil
+	case "proxyLocal":
+		return engine.nativeProxyLocal(input.Path, input.Key)
 	default:
 		return nil, errors.New("不支持的应用操作")
 	}
+}
+
+func (engine *nativeEngine) nativeProxyLocal(filePath, keyHex string) (nativePlan, error) {
+	engine.mu.Lock()
+	var err error
+	if engine.stream == nil {
+		engine.stream, err = newNativeStreamServer(engine.downloader)
+	}
+	stream := engine.stream
+	engine.mu.Unlock()
+	if err != nil {
+		return nativePlan{}, err
+	}
+	localURL, streamToken, err := stream.nativeOpenLocal(filePath, keyHex)
+	if err != nil {
+		return nativePlan{}, err
+	}
+	choice := nativePlaybackChoice{
+		streamSession: streamToken,
+		created:       time.Now(),
+	}
+	var expired []string
+	engine.mu.Lock()
+	if engine.playbacks == nil {
+		engine.playbacks = map[string]nativePlaybackChoice{}
+	}
+	for token, old := range engine.playbacks {
+		if time.Since(old.created) > 12*time.Hour {
+			expired = append(expired, old.streamSession)
+			delete(engine.playbacks, token)
+		}
+	}
+	if len(engine.playbacks) >= 8 {
+		oldest := ""
+		for token, old := range engine.playbacks {
+			if oldest == "" || old.created.Before(engine.playbacks[oldest].created) {
+				oldest = token
+			}
+		}
+		expired = append(expired, engine.playbacks[oldest].streamSession)
+		delete(engine.playbacks, oldest)
+	}
+	engine.playbacks[streamToken] = choice
+	engine.mu.Unlock()
+	for _, token := range expired {
+		stream.nativeRelease(token)
+	}
+	return nativePlan{
+		Local:      true,
+		URL:        localURL,
+		Headers:    map[string]string{},
+		Session:    streamToken,
+		RouteCount: 1,
+	}, nil
 }
 
 func (engine *nativeEngine) nativeCatalog(ctx context.Context, input nativeInput) (nativeCatalogResult, error) {
@@ -514,17 +581,22 @@ func (engine *nativeEngine) nativeCatalog(ctx context.Context, input nativeInput
 	d := engine.downloader
 	result := nativeCatalogResult{Items: []nativeDrama{}, Page: page}
 	if query != "" && source == sourceHongguo {
-		entry, err := d.searchHongguoDramas(ctx, query)
+		var entry hongguoSearchEntry
+		var err error
+		if page == 1 {
+			entry, err = d.searchHongguoDramas(ctx, query)
+		} else if keyword, keywordErr := hongguoSearchKeyword(query); keywordErr != nil {
+			err = keywordErr
+		} else {
+			entry, err = d.fetchHongguoSearchPage(ctx, keyword, page)
+		}
 		if err != nil {
 			return result, err
 		}
 		for _, drama := range entry.Dramas {
 			result.Items = append(result.Items, nativeNormalize(drama))
 		}
-		result.Warning, result.Page = entry.Warning, 1
-		if entry.Limited && result.Warning == "" {
-			result.Warning = "已显示当前可获取的匹配结果，使用更完整的剧名可继续查找"
-		}
+		result.Warning, result.HasMore = entry.Warning, entry.HasMore
 		return result, nil
 	}
 	if query != "" && source == sourceHuangju {
@@ -551,6 +623,17 @@ func (engine *nativeEngine) nativeCatalog(ctx context.Context, input nativeInput
 	}
 	if query != "" && source == sourceGuipian {
 		items, more, err := d.fetchGuipianCatalogPage(ctx, page, "", query)
+		if err != nil {
+			return result, err
+		}
+		for _, drama := range items {
+			result.Items = append(result.Items, nativeNormalize(drama))
+		}
+		result.HasMore = more
+		return result, nil
+	}
+	if query != "" && source == sourceHuangguoAI {
+		items, more, err := d.searchHuangguoAI(ctx, page, query)
 		if err != nil {
 			return result, err
 		}
@@ -618,6 +701,10 @@ func (engine *nativeEngine) nativeCatalog(ctx context.Context, input nativeInput
 	var err error
 	switch source {
 	case sourceHongguo:
+		if strings.HasPrefix(category, hongguoTagPrefix) {
+			items, result.HasMore, err = d.fetchHongguoTagPage(ctx, category, page)
+			break
+		}
 		engine.mu.Lock()
 		known := make(map[string]bool, len(engine.catalogs[cacheKey]))
 		for _, drama := range engine.catalogs[cacheKey] {
@@ -785,6 +872,8 @@ func (engine *nativeEngine) nativeResolve(ctx context.Context, input nativeInput
 		return nativePlan{}, err
 	}
 	choice := nativePlaybackChoices(media, input.Quality)
+	choice.dramaID = input.Drama.ID
+	engine.applyPreferredRoute(input.Drama.ID, &choice)
 	if series, video, valid := hongguoPlaybackIDs(task); valid {
 		choice.danmakuSeries, choice.danmakuVideo = series, video
 	}

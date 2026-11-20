@@ -11,21 +11,6 @@ import (
 	"strings"
 )
 
-// 韩小圈（hanxiaoquan）原生站源：MacCMS 苹果 CMS 标准模板站点，韩剧/韩国电影/韩国综艺/韩国动漫。
-//
-// 上游页面（实测 2026-09，走国内网络）：
-//   GET /                      首页（热播推荐）
-//   GET /hxq/{id}.html         分类第 1 页（id: 1 最新韩剧 2 韩国电影 3 韩国综艺 4 韩国动漫）
-//   GET /hxq/{id}-{page}.html  分类翻页（第 1 页省略后缀）
-//   GET /hanxiaoquan/{id}.html 详情（含多线路播放列表）
-//   GET /play/{id}-{line}-{ep}.html  播放页（var now="<m3u8>"）
-//   GET /search.php?searchword=  搜索
-//
-// 列表卡片为 <div class="module-item">，标题取 module-item-title，封面取 img[data-src]，
-// 备注取 module-item-text（多为更新日期）。详情字段为 <span class="video-info-itemtitle">，
-// 封面取 og:image 或 video-cover 内的 data-src。播放列表按 <div id="playlist{N}"> 分线路，
-// 分集为 <a title="第NN集" href="/play/{id}-{line}-{ep}.html">。
-
 const (
 	hanxiaoquanSiteBaseURL = "https://www.jennyhow.com"
 	hanxiaoquanUserAgent   = "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Mobile Safari/537.36"
@@ -82,7 +67,6 @@ func hanxiaoquanNumericID(value string) bool {
 	return err == nil && number > 0
 }
 
-// hanxiaoquanClean 去标签、解 HTML 实体、压缩空白。
 func hanxiaoquanClean(text string) string {
 	if text == "" {
 		return ""
@@ -124,7 +108,6 @@ func (d *Downloader) hanxiaoquanGet(ctx context.Context, path string) (string, e
 	return d.fetchProviderText(pageContext, address, site+"/")
 }
 
-// parseHanxiaoquanCards 解析 module-item 卡片列表。
 func parseHanxiaoquanCards(body string) []Drama {
 	items := make([]Drama, 0, hanxiaoquanPageSize)
 	seen := map[string]bool{}
@@ -171,7 +154,6 @@ func parseHanxiaoquanCards(body string) []Drama {
 	return items
 }
 
-// hanxiaoquanPageCount 从分页链接推断末页；拿不到时按当前页是否满页保守判断。
 func hanxiaoquanPageCount(body, category string, page, count int) int {
 	pattern := regexp.MustCompile(fmt.Sprintf(`(?is)/hxq/%s-(\d+)\.html`, regexp.QuoteMeta(category)))
 	maxPage := page
@@ -218,7 +200,6 @@ func (d *Downloader) fetchHanxiaoquanCatalogPage(ctx context.Context, page int, 
 	return items, page < pageCount, nil
 }
 
-// hanxiaoquanInfoFields 抽取详情页的 video-info-items 字段。
 func hanxiaoquanInfoFields(body string) map[string]string {
 	fields := map[string]string{}
 	for _, match := range reHanxiaoquanInfoItem.FindAllStringSubmatch(body, -1) {
@@ -231,8 +212,12 @@ func hanxiaoquanInfoFields(body string) map[string]string {
 	return fields
 }
 
-// hanxiaoquanPickPlaylist 解析全部线路，返回分集最多的那条线的线路名与分集。
-func hanxiaoquanPickPlaylist(body string) (string, []Chapter, error) {
+type hanxiaoquanLine struct {
+	name     string
+	chapters []Chapter
+}
+
+func hanxiaoquanPlaylists(body string) []hanxiaoquanLine {
 	lineNames := map[string]string{}
 	for _, tab := range reHanxiaoquanLineTab.FindAllStringSubmatch(body, -1) {
 		lineNames[tab[1]] = strings.TrimSpace(tab[2])
@@ -243,11 +228,9 @@ func hanxiaoquanPickPlaylist(body string) (string, []Chapter, error) {
 	}
 	sort.Strings(lineIDs)
 	if len(lineIDs) == 0 {
-		// 无 tab 时兜底：直接扫描页面内所有分集链接。
 		lineIDs = []string{""}
 	}
-	bestName := ""
-	var best []Chapter
+	lines := make([]hanxiaoquanLine, 0, len(lineIDs))
 	for _, lineID := range lineIDs {
 		segment := body
 		if lineID != "" {
@@ -256,8 +239,6 @@ func hanxiaoquanPickPlaylist(body string) (string, []Chapter, error) {
 			if start < 0 {
 				continue
 			}
-			// 从本容器标记之后开始找下一个 playlist 容器或列表结束标记，
-			// 避免匹配到容器自身导致截断失败（进而把后续线路的分集一并算入）。
 			segment = body[start+len(marker):]
 			if end := strings.Index(segment, `id="playlist`); end >= 0 {
 				segment = segment[:end]
@@ -293,9 +274,20 @@ func hanxiaoquanPickPlaylist(body string) (string, []Chapter, error) {
 				Referer:        hanxiaoquanSiteBaseURL + "/",
 			})
 		}
-		if len(chapters) > len(best) {
-			best = chapters
-			bestName = lineNames[lineID]
+		if len(chapters) > 0 {
+			lines = append(lines, hanxiaoquanLine{name: lineNames[lineID], chapters: chapters})
+		}
+	}
+	return lines
+}
+
+func hanxiaoquanPickPlaylist(body string) (string, []Chapter, error) {
+	bestName := ""
+	var best []Chapter
+	for _, line := range hanxiaoquanPlaylists(body) {
+		if len(line.chapters) > len(best) {
+			best = line.chapters
+			bestName = line.name
 		}
 	}
 	if len(best) == 0 {
@@ -309,7 +301,6 @@ func hanxiaoquanPickPlaylist(body string) (string, []Chapter, error) {
 	return bestName, best, nil
 }
 
-// hanxiaoquanPlayURL 归一化播放锚点并校验同源。
 func hanxiaoquanPlayURL(href string) string {
 	href = strings.TrimSpace(href)
 	if href == "" {
@@ -361,7 +352,6 @@ func (d *Downloader) fetchHanxiaoquanDetail(ctx context.Context, sourceID string
 	if description == "" {
 		description = fields["简介"]
 	}
-	// 简介里常夹带 "@广告词@" 形式的干扰词，去掉首尾 @...@ 段。
 	description = reHanxiaoquanAdText.ReplaceAllString(description, "")
 
 	drama := Drama{
@@ -403,19 +393,51 @@ func (d *Downloader) fetchHanxiaoquanDetail(ctx context.Context, sourceID string
 	return drama, chapters, nil
 }
 
-func (d *Downloader) resolveHanxiaoquanMedia(ctx context.Context, task Task) (providerMedia, error) {
-	source, sourceID, valid := splitProviderDramaID(task.DramaID)
-	prefix := providerChapterID(sourceHanxiaoquan, sourceID, "")
-	if !valid || source != sourceHanxiaoquan || !hanxiaoquanNumericID(sourceID) || !strings.HasPrefix(task.Chapter.ID, prefix) {
-		return providerMedia{}, errors.New("韩小圈播放分集信息无效，请刷新详情")
+func hanxiaoquanAlternatePlayURLs(body, targetPlayURL, episodeKey string) []string {
+	lines := hanxiaoquanPlaylists(body)
+	targetIdx := -1
+	for _, line := range lines {
+		for idx, ch := range line.chapters {
+			if ch.PageURL == targetPlayURL {
+				targetIdx = idx
+				if episodeKey == "" {
+					episodeKey = ch.EpisodeString(idx + 1)
+				}
+				break
+			}
+		}
+		if targetIdx >= 0 {
+			break
+		}
 	}
-	playURL := strings.TrimPrefix(task.Chapter.ID, prefix)
-	if playURL == "" {
-		playURL = task.Chapter.PageURL
+	var out []string
+	seen := map[string]bool{targetPlayURL: true}
+	addCandidate := func(ch Chapter, idx int) {
+		if ch.PageURL == "" || seen[ch.PageURL] {
+			return
+		}
+		if episodeKey != "" && ch.EpisodeString(idx+1) == episodeKey {
+			seen[ch.PageURL] = true
+			out = append(out, ch.PageURL)
+		}
 	}
-	if hanxiaoquanPlayURL(playURL) == "" {
-		return providerMedia{}, errors.New("韩小圈播放页地址无效")
+	for _, line := range lines {
+		for idx, ch := range line.chapters {
+			addCandidate(ch, idx)
+		}
 	}
+	if len(out) == 0 && targetIdx >= 0 {
+		for _, line := range lines {
+			if targetIdx < len(line.chapters) && line.chapters[targetIdx].PageURL != "" && !seen[line.chapters[targetIdx].PageURL] {
+				seen[line.chapters[targetIdx].PageURL] = true
+				out = append(out, line.chapters[targetIdx].PageURL)
+			}
+		}
+	}
+	return out
+}
+
+func (d *Downloader) resolveHanxiaoquanPlayPage(ctx context.Context, playURL string) (providerMedia, error) {
 	body, err := d.hanxiaoquanGet(ctx, playURL)
 	if err != nil {
 		return providerMedia{}, err
@@ -447,14 +469,55 @@ func (d *Downloader) resolveHanxiaoquanMedia(ctx context.Context, task Task) (pr
 	return media, nil
 }
 
-// searchHanxiaoquan 调用站点搜索接口。
+func (d *Downloader) resolveHanxiaoquanMedia(ctx context.Context, task Task) (providerMedia, error) {
+	source, sourceID, valid := splitProviderDramaID(task.DramaID)
+	prefix := providerChapterID(sourceHanxiaoquan, sourceID, "")
+	if !valid || source != sourceHanxiaoquan || !hanxiaoquanNumericID(sourceID) || !strings.HasPrefix(task.Chapter.ID, prefix) {
+		return providerMedia{}, errors.New("韩小圈播放分集信息无效，请刷新详情")
+	}
+	playURL := strings.TrimPrefix(task.Chapter.ID, prefix)
+	if playURL == "" {
+		playURL = task.Chapter.PageURL
+	}
+	if hanxiaoquanPlayURL(playURL) == "" {
+		return providerMedia{}, errors.New("韩小圈播放页地址无效")
+	}
+	media, err := d.resolveHanxiaoquanPlayPage(ctx, playURL)
+	if err == nil {
+		return media, nil
+	}
+	lastErr := err
+	regionBlocked := strings.Contains(strings.ToLower(err.Error()), "403") || strings.Contains(strings.ToLower(err.Error()), "denied")
+	if ctx.Err() == nil {
+		if detailBody, detailErr := d.hanxiaoquanGet(ctx, "/hanxiaoquan/"+sourceID+".html"); detailErr == nil {
+			for _, altPlayURL := range hanxiaoquanAlternatePlayURLs(detailBody, playURL, task.Chapter.EpisodeString(1)) {
+				if ctx.Err() != nil {
+					break
+				}
+				altMedia, altErr := d.resolveHanxiaoquanPlayPage(ctx, altPlayURL)
+				if altErr == nil {
+					return altMedia, nil
+				}
+				lastErr = altErr
+				lower := strings.ToLower(altErr.Error())
+				if strings.Contains(lower, "403") || strings.Contains(lower, "denied") {
+					regionBlocked = true
+				}
+			}
+		}
+	}
+	if regionBlocked {
+		return providerMedia{}, fmt.Errorf("韩小圈当前网络/IP 地区受限，源站拒绝访问媒体资源（%w）", lastErr)
+	}
+	return providerMedia{}, lastErr
+}
+
 func (d *Downloader) searchHanxiaoquan(ctx context.Context, page int, query string) ([]Drama, bool, error) {
 	query = strings.TrimSpace(query)
 	if query == "" || len(query) > 256 {
 		return nil, false, errors.New("韩小圈搜索关键词无效")
 	}
 	if page > 1 {
-		// 站点搜索无翻页，直接返回空。
 		return []Drama{}, false, nil
 	}
 	body, err := d.hanxiaoquanGet(ctx, "/search.php?"+url.Values{"searchword": {query}}.Encode())
